@@ -7,7 +7,6 @@
 #' @param G Positive integer specifying the number of clusters to test.
 #' @param group_labels Optional. A vector of integers identifying the true cluster each row belongs to.
 #' @param parameter_space Optional. Matrix of underlying parameter space that data was generated from.
-#' @param gr_method Deprecated. Previously used to determine method of gradient descent. Defaults to using constant step size (CSS).
 #' @param max_iter Positive double. Max number of iterations to test. Default maximum for iterations is \eqn{1000}.
 #' @param step_size Positive double. Step size for gradient descent method. Default step size is \eqn{0.0005}
 #' @param calc_norm_factors Boolean. Should the data be scaled to account for different sampling depths?
@@ -42,7 +41,7 @@
 #' mclust::map(PLNClust_results[[2]]$z)
 #' @export
 MixPLNClust_R <- function(count_matrix,G,group_labels=NULL,parameter_space=NULL,
-                          gr_method="CSS",max_iter=1000, step_size = 0.0005,
+                          max_iter=1000, step_size = 0.0005,
                           calc_norm_factors = FALSE, custom_lib_mat = NULL,
                           init = "kmmeans"){
   
@@ -78,6 +77,7 @@ MixPLNClust_R <- function(count_matrix,G,group_labels=NULL,parameter_space=NULL,
   }
   
   #Create observation matrix
+  #1 indicates an observation is present, 0 indicates missing
   O_mat <- matrix(NA,nrow = N,ncol = d)
   for(col in 1:d){
     for (row in 1:N){
@@ -94,23 +94,13 @@ MixPLNClust_R <- function(count_matrix,G,group_labels=NULL,parameter_space=NULL,
   }
   O_mat <- O_mat[ !all_miss, ]
   
-  
-  
-  #updated count matrix with entries determined to be missing set to 0.
-  Y[is.na(O_mat)] <- NA
-  
-  ###Removes any observation with all values missing
-  all_miss <- apply(Y, 1, function(x) all(is.na(x)))
-  Y <- Y[ !all_miss, ]
-  
-  N <- nrow(Y) #sample size
-  d <- ncol(Y) #dimension of the data
-  
+  #extraction matrices for each individual
   O_list <- list()
   for (i in 1:N){
     O_list[[i]] <- diag(d)[which(O_mat[i,]==1),,drop=FALSE]
   }
   
+  #preprocessing for non-simulated data that needs to be scaled
   Y_2 <- Y
   Y_2[is.na(Y_2)] <- 0
   all_miss <- apply(Y_2, 1, function(x) all(is.na(x)))
@@ -153,16 +143,16 @@ MixPLNClust_R <- function(count_matrix,G,group_labels=NULL,parameter_space=NULL,
   kept <- as.numeric(rownames(stats::na.omit(ini_Y)))
   k_means <- NULL
   if(init == "kmmeans"){
-    k_means <- kmmeans::kmmeans(as.data.frame(log(ini_Y+1)),K=G,n.init = 100)[["partition"]]  ##Using k missing means to start to algorithm
+    k_means <- kmmeans::kmmeans(as.data.frame(log(ini_Y+1)),K=G,n.init = 100)[["partition"]]  ##Using k missing means for starting cluster partition
     z <- mclust::unmap(k_means) ##Initial value for Z
   }
   if(init == "rand"){
-    z_vec <- sample(c(1:G),N,replace=TRUE)
+    z_vec <- sample(c(1:G),N,replace=TRUE) #if random initialization selected, just randomly assign clusters
     z <- mclust::unmap(z_vec)
   }
   pi_g <- colSums(z)/N
   
-  ###Initial value for Mu and Sigma
+  
   ini_Y2 <- na.omit(ini_Y)
   ini_Y[is.na(ini_Y)] <- 0
   
@@ -171,13 +161,13 @@ MixPLNClust_R <- function(count_matrix,G,group_labels=NULL,parameter_space=NULL,
     obs <- which(z[kept,g]==1)
     mu[[g]] <- colMeans(log(ini_Y2[obs,]+1/6))
     sigma[[g]] <- stats::var(log(ini_Y2[obs,]+1/6))
-    isigma[[g]] <- MASS::ginv(sigma[[g]],tol=1e-20)
+    isigma[[g]] <- MASS::ginv(sigma[[g]],tol=1e-20) #inverse sigma
   }
   
   
   
   
-  ###Initial value for m and S
+  ###Initial value for m and S. These are parameters for approximating density q
   for (g in 1:G){
     S[[g]] <- list()
     start[[g]] <- list()
@@ -201,9 +191,12 @@ MixPLNClust_R <- function(count_matrix,G,group_labels=NULL,parameter_space=NULL,
   
   
   ## ---------- helpers ----------
+  
+  #trace of matrix
   .tr <- function(M) {
     sum(diag(M))
   }
+  #ensure symmetry in face of numerical imprecision. Keeps quadratic forms equal
   .symmetrize <- function(M) {
     0.5 * (M + t(M))
   }
@@ -335,11 +328,6 @@ MixPLNClust_R <- function(count_matrix,G,group_labels=NULL,parameter_space=NULL,
     colSums(z) / as.numeric(N)
   }
   
-  
-  create_lib_mat_full <- function(lib_mat, N) {
-    matrix(as.numeric(lib_mat), nrow = N, ncol = length(lib_mat), byrow = TRUE)
-  }
-  
   compute_iOsigO <- function(O_list, sigma, iOsigO) {
     G <- length(sigma)
     N <- length(O_list)
@@ -456,7 +444,7 @@ MixPLNClust_R <- function(count_matrix,G,group_labels=NULL,parameter_space=NULL,
       dGX[[g]] <- list()
       z_S[[g]] <- list()
       
-      ## update g parameters
+      ## update approximation q parameters per cluster
       g_params <- tryCatch(
         update_g_params(GX[[g]], dGX[[g]], z_S[[g]], m[[g]], O_list,
                         start[[g]], S[[g]], iOsigO[[g]], lib_mat, ini_Y,
@@ -489,24 +477,21 @@ MixPLNClust_R <- function(count_matrix,G,group_labels=NULL,parameter_space=NULL,
       sigma_new[[g]] <- sigma_new_g$sigma_new_g
     }
     
-    ## SPD check + accept sigma
+    ## SPD check. Update sigma_g,t to sigma_g,(t+1) if new sigma meets requirements
     PD_Check <- tryCatch(PD_check(sigma_new, G),
                          error = function(e) { message("Error: ", e$message); FALSE })
     if (isTRUE(PD_Check)) sigma <- sigma_new
     
-    ## inverse caches
+    ## calculate inverse sigma matrices
     invert_matrices(sigma, isigma, G)
     
-    ## mixing proportions
+    ## update percent of observations in each cluster
     pi_g <- compute_pi_g(z, N)
     
-    ## lib mat (if you actually need it later)
-    lib_mat_full <- create_lib_mat_full(lib_mat, N)
-    
-    ## iOsigO refresh
+    ## update approximating q covariance param for each observation
     compute_iOsigO(O_list, sigma, iOsigO)
     
-    ## E-step like matrices + loglik
+    ## E-step like + loglik
     results <- tryCatch(
       compute_F_matrices(S, m, O_list, mu, iOsigO, O_mat, ini_Y, pi_g),
       error = function(e) { message("Error: ", e$message); NULL }

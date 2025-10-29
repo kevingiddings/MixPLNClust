@@ -9,7 +9,6 @@ MixPLNClust(
   G,
   group_labels = NULL,
   parameter_space = NULL,
-  gr_method = "CSS",
   max_iter = 1000,
   step_size = 5e-04,
   calc_norm_factors = FALSE,
@@ -25,8 +24,6 @@ MixPLNClust(
 \item{group_labels}{Optional. A vector of integers identifying the true cluster each row belongs to.}
 
 \item{parameter_space}{Optional. Matrix of underlying parameter space that data was generated from.}
-
-\item{gr_method}{Deprecated. Previously used to determine method of gradient descent. Defaults to using constant step size (CSS).}
 
 \item{max_iter}{Positive double. Max number of iterations to test. Default maximum for iterations is \eqn{1000}.}
 
