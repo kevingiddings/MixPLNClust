@@ -1,0 +1,227 @@
+---
+title: "MixPLNClust Vignette"
+author: "Kevin Giddings"
+date: "October 29, 2025"
+vignette: >
+  %\VignetteIndexEntry{MixPLNClust}
+  %\VignetteEngine{quarto::html}
+  %\VignetteEncoding{UTF-8}
+format:
+  html:
+    code-overflow: wrap
+knitr:
+  opts_chunk:
+    collapse: true
+    comment: '#>'
+code-fold: show
+toc: true
+toc-location: left
+theme: zephyr
+execute:
+  message: false
+warning: false
+editor: source
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo=TRUE, message=FALSE, warning=FALSE,
+  fig.align="center", dev="svglite", cache = FALSE,
+  cache.lazy = FALSE
+)
+
+old_hooks <- fansi::set_knit_hooks(
+  knitr::knit_hooks,
+  which = c("output", "message", "warning", "error")
+)
+
+options(crayon.enabled=TRUE)
+
+set.seed(123)
+
+```
+
+
+
+## Introduction
+
+**MixPLNClust** is an R package for model based clustering of incomplete discrete count data based on mixtures of multivariate Poisson log-normal (MPLN) distributions. Using the EM algorithm, it provides parameter estimates for the latent Gaussian space. It also estimates the number of clusters present in the data set using the Bayesian information criterion (BIC).
+
+This document provides a brief overview of **MixPLNClust**. It was written in Quarto using [knitr](https://cran.r-project.org/web/packages/knitr/index.html).
+
+
+```{r}
+library(MixPLNClust)
+library(mclust) #helpful functions for illustrating clustering performance
+```
+
+
+## Clustering Complete Data
+
+This package includes a sample data set. We will use this as our example data set for clustering. This sample data set is simulated count data from a mixture of $2$ MPLN distributions.
+
+```{r}
+data(MixPLN_data)
+
+Counts <- MixPLN_data$Counts #Complete data
+head(Counts)
+
+class <- mclust::map(MixPLN_data$ClusterMembership)
+
+pairs(log(Counts + 1), col = class)
+
+clusters_to_test <- c(1:5) #true number of clusters is 2
+Clustering_results <- list()
+
+for(cluster in clusters_to_test){
+  Clustering_results[[cluster]] <- MixPLNClust(Counts,cluster,group_labels = class)
+}
+
+BIC_vect <- sapply(Clustering_results,function(x) x$BIC)
+plot(c(1:5),BIC_vect,type="l",xlab = "Number of Clusters", ylab= "BIC")
+
+optimal_G <- which.max(BIC_vect)
+optimal_G
+```
+
+### ARI
+
+We can see that **MixPLNClust** was able to correctly identify that there are $2$ clusters in this data set. Additionally, if we look at the adjusted Rand index for this clustering solution, we can see perfect cluster recovery.
+
+```{r}
+Optimal_ARI <- Clustering_results[[optimal_G]]$ARI
+Optimal_ARI
+```
+
+### Parameter Recovery
+
+We also have very accurate parameter recovery:
+
+```{r}
+Label_switching_fix <- order(Clustering_results[[2]][["pi_g"]],decreasing = TRUE)
+mu_estimate <- Clustering_results[[2]][["mu"]][Label_switching_fix] #order the mu estimates in decreasing pi_g order, as it is ordered in MixPLN_data
+
+true_mu <- MixPLN_data$ParameterInfo[["mu"]]
+
+mu_dists <- vapply(seq_along(true_mu), function(k) { #calculate Euclidean distances
+  norm(true_mu[[k]] - mu_estimate[[k]],"2")
+},numeric(1))
+mu_dists
+
+Sigma_estimate <- Clustering_results[[2]][["sigma"]][Label_switching_fix]
+true_Sigma <- MixPLN_data$ParameterInfo[["Sigma"]]
+
+Sigma_dists <- vapply(seq_along(true_mu), function(k) { #calculate Frobenius distances
+  norm(true_Sigma[[k]] - Sigma_estimate[[k]],"F")
+},numeric(1))
+Sigma_dists
+```
+
+
+## Clustering Incomplete Data
+
+We now examine the scenario in which our data has some missing values. Below we have defined a function to ampute 
+values from the matrix according to different missing data mechanisms: missing completely at random (MCAR), missing at random (MAR), and missing not at random (MNAR). We use the function **ampute** from the package [mice](https://cran.r-project.org/web/packages/mice/index.html).
+ 
+```{r}
+#| code-fold: true
+#| code-summary: "View function to generate missing values"
+
+#This function takes in a matrix, percent missing value, as well as a mechanism for creating missing data.
+# The percent missing parameter is the approximate percent of rows which have at least 1 missing value.
+# The mechanism parameter is used by the mice::ampute() function to generate missing values
+generate_missing_values <- function (countmat, percent_miss = 0.1, mech = "MAR") 
+{
+  d <- dim(countmat)[2]  
+  pattern <- matrix(1, ncol = d)
+    for (i in seq(d, 2, -1)) {
+        pattern <- rbind(pattern, gtools::permutations(d, d, 
+            c(rep(1, times = i), rep(0, times = d - i)), set = FALSE)) #pattern to ensure at least 2 entries in each row
+    }
+    pattern <- dplyr::distinct(as.data.frame(pattern))
+    pattern <- pattern[-1, ] #remove no missing values pattern
+    attempts <- 1
+    while (attempts < 10) {
+        candidate_missing_dat <- as.matrix(mice::ampute(countmat, 
+            prop = percent_miss, patterns = pattern, mech = mech)[["amp"]])
+        for (col in 1:ncol(candidate_missing_dat)) {
+            if (all(is.na(candidate_missing_dat[, col]))) { #Sometimes ampute can break and cause columns with all NA values. This bug does not have a clear cause, that I could find. 
+                attempts <- attempts + 1
+                next
+            }
+        }
+        amputed_mat <- candidate_missing_dat
+        break
+    }
+    if (attempts >= 10) {
+        stop("Missing data process is consistently creating columns of all missing values!")
+    }
+    return(amputed_mat)
+}
+```
+
+
+```{r}
+missing_counts <- generate_missing_values(Counts,percent_miss = 0.30,mech="MNAR")
+
+summary(missing_counts) #We see now that there are many NA values in our data
+Clustering_results_missing <- list()
+for(cluster in clusters_to_test){
+  Clustering_results_missing[[cluster]] <- MixPLNClust(missing_counts,cluster,group_labels = class)
+}
+BIC_vect <- sapply(Clustering_results_missing,function(x) x$BIC)
+plot(c(1:5),BIC_vect,type="l",xlab = "Number of Clusters", ylab= "BIC")
+
+optimal_G <- which.max(BIC_vect)
+optimal_G
+```
+
+### ARI
+
+We see that **MixPLNClust** is still able to identify that there are $2$ clusters in the data set. Additionally, the cluster membership, while no longer being perfect, is still very accurate:
+
+```{r}
+Optimal_ARI <- Clustering_results_missing[[optimal_G]]$ARI
+Optimal_ARI
+```
+
+### Parameter Recovery
+
+Similar to ARI, we see a small drop in the ability to estimate the latent Gaussian parameters in the presence of incomplete data, but **MixPLNClust** is still able to accurately estimate the parameters.
+
+```{r}
+Label_switching_fix <- order(Clustering_results_missing[[2]][["pi_g"]],decreasing = TRUE)
+mu_estimate_miss <- Clustering_results_missing[[2]][["mu"]][Label_switching_fix] #order the mu estimates in decreasing pi_g order, as it is ordered in MixPLN_data
+
+mu_dists_miss <- vapply(seq_along(true_mu), function(k) { #calculate Euclidean distances
+  norm(true_mu[[k]] - mu_estimate_miss[[k]],"2")
+},numeric(1))
+mu_dists_miss
+
+Sigma_estimate_miss <- Clustering_results_missing[[2]][["sigma"]][Label_switching_fix]
+
+Sigma_dists_miss <- vapply(seq_along(true_mu), function(k) { #calculate Frobenius distances
+  norm(true_Sigma[[k]] - Sigma_estimate_miss[[k]],"F")
+},numeric(1))
+Sigma_dists_miss
+```
+
+We can also compare the parameter estimates against each other, to see just how much of a performance decrease we faced:
+
+```{r}
+mu_estimates_diff <- vapply(seq_along(mu_estimate), function(k) { #calculate Euclidean distances
+  norm(mu_estimate[[k]] - mu_estimate_miss[[k]],"2")
+},numeric(1))
+mu_estimates_diff
+
+Sigma_estimates_diff <- vapply(seq_along(Sigma_estimate), function(k) { #calculate Frobenius distances
+  norm(Sigma_estimate[[k]] - Sigma_estimate_miss[[k]],"F")
+},numeric(1))
+Sigma_estimates_diff
+
+```
+
+
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,8 @@
+^.git$
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.github$
+^vignettes/\.quarto$
+^vignettes/*_files$
+^doc$
+^Meta$
