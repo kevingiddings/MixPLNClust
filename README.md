@@ -3,7 +3,7 @@ R package for clustering multivariate discrete count data with incomplete values
 
 ## Installation
 
-Requires EdgeR, a Biocunductor pacakge. This package can abe installed with the following code:
+Requires EdgeR, a Biocunductor pacakge. This package can be installed with the following code:
 
 ```{r}
 if (!require("BiocManager", quietly = TRUE))
